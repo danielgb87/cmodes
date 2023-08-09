@@ -1,0 +1,518 @@
+function caps_main_with_parcellation
+
+% This is an example pipeline of usage of the CAPs_mice_toolbox. Many
+% of the sub-functions used here are based and/or modified from the
+% CAPsTOOLBOX from reference [1].
+
+% You can customize this code to fit your analysis by using or deleting
+% steps.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% REFS.
+% [1] Amico, Enrico, et al. "Posterior Cingulate Cortex-Related
+% Co-Activation Patterns: A Resting State fMRI Study in Propofol-Induced
+% Loss of Consciousness." PloS one 9.6 (2014): e100012.
+
+%[2] Liu X, Duyn JH (2013) Time-varying functional network information
+%extracted from brief instances of spontaneous brain activity. Proceedings
+%of the National Academy of Sciences 110: 4392�4397.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Written by Daniel Gutierrez-Barragan 2016, V5 14-11-17
+% _________________________________________________________________________
+
+% define a working directory
+% the main directory is where you should eventually find the matrix data,
+% mas_info_ and motion info in subsequent analyses, without having to
+% convert data, nor perform the preliminary analyses (step 1) again.
+
+inputs.main = 'D:\Gutierrez\mice_dFC\results_shank3';
+cd(inputs.main)
+inputs.TR=1.2;
+%% 1. Prepare data for analysis and check_motion (Takes around 0.5 minutes per subject with 500 timepoints and around 80.000 in-brain voxels).
+
+% define which dataset are you using and its path; the preprocessing step
+% and suffix; and the mask and its path.
+data_path = 'D:\DATA\Gutierrez\Shank3B_raw_and_prepocessed_by_marco';
+inputs.data_path = data_path;
+mask_path = 'D:\DATA\Gutierrez\Shank3B_raw_and_prepocessed_by_marco\chd8_functional_template_mask.nii.gz';
+inputs.mask_path = mask_path;
+pp_step   = 'smoothing';
+inputs.pp_step = pp_step;
+pp_suffix = '*KO_rsBOLD_smoothed.nii.gz';
+inputs.pp_suffix = pp_suffix;
+
+%extract data into matrix form.
+[data, mask_info, subject_list] = dataset_matrix_convert_in_folder(data_path, pp_step, pp_suffix, mask_path);
+
+cd(inputs.main)
+dataset_name = 'shank3_KO_data';
+inputs.dataset_name = dataset_name;
+mask_info_name = 'mask_info_chd8';
+inputs.mask_info_name = mask_info_name;
+motion_info_name = 'motion_info_shank3KO_05';
+inputs.motion_info_name = motion_info_name;
+
+save(dataset_name,'data','-v7.3')
+save(mask_info_name,'mask_info','-v7.3')
+save('subject_list_shank3_KO','subject_list','-v7.3')
+
+
+% another option is to load data already in cell-matrix format and a
+% mask_info file. Remember that the mask_info structure MUST contain at
+% least: 1-The mask_file path; 2- the 3D binary tensor (as given by
+% spm_readvol); and 3- the three arrays of the indexes of non-zero
+% elements.
+%
+% load('D:\Gutierrez\mice_dFC\results_paper\shank3_WT_data.mat');
+% load('D:\Gutierrez\mice_dFC\results_paper\mask_info_chd8.mat');
+% load('D:\Gutierrez\mice_dFC\results_paper\subject_list_shank3_WT.mat');
+% load('D:\Gutierrez\mice_dFC\results_paper\motion_info_shank3WT_075.mat');
+Nsubs = length(data);
+
+cd(inputs.main)
+disp('done preparing data')
+
+% Motion check data (takes around 3 second).
+% Build an inputs structure with the motion checking parameters.
+inputs.motion.radius           = 5;      % mouse brain radius (5mm by default)
+inputs.motion.divide           = 1;      % divide by 10 translation motion traces.
+inputs.motion.suite            = 'afni'; % suite used to obtain motion parameters ('fsl', 'afni', or 'spm')
+inputs.motion.censor_method    = 'FD';   % can be 'FD' or 'DVARS' depending on the criteria
+inputs.motion.scrub_thr        = 0.05;   % Framewise displacement censoring criteria (in mm).
+inputs.motion.DVARSscrub_thr   = 0.5;    % DVARS censoring criteria (in % signal change).
+% define preprocessing step where the motion parameters are.
+motion_preproc = 'motion_correction';
+motion_suffix  = '*KO_rsBOLD_mcf.txt';
+
+motion_info = motion_check_in_folder(inputs.motion, data_path,motion_preproc,motion_suffix);
+inputs.pproc.motion_check = 1;
+motion_info.inputs = inputs.motion;
+
+disp('done checking motion')
+cd(inputs.main)
+save(motion_info_name,'motion_info','-v7.3')
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% 2. Post-processing of data.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% for each step done, try to also save an inputs structure to save at the
+% end of the analysis to have record of all processes done.
+
+%2.0 If only a part of the scan will be used, partition the data.
+% for sub = 1:length(data)
+%     data1{sub,1} = data{sub,1}(501:1000,:);
+% end
+% clear data
+% data = data1; clear data1
+% save('data_xan_xan_hires_pt2','data','-v7.3')
+
+%2.0.1 if you want to notch filter the data
+Nsubs = length(data);
+TR=1.2;
+fout = 0.025;
+for sub = 1:Nsubs
+    dtemp = data{sub};
+    dnew = zeros(size(dtemp));
+    parfor v = 1:size(dtemp,2)
+        dnew(:,v) = filt_notch(spm_vec(dtemp(:,v)),TR,fout,4);
+    end
+    data{sub} = dnew;
+end
+
+clear dnew dtemp
+
+
+% 2.1 Normalize and detrend time-series (Takes around 3 seconds per subject).
+data = postproc_normalize(data);
+inputs.pproc.normalize = 1;
+
+
+% 2.2 Deconvolve data. This can be done ONLY if data has been normalized.
+% define parameters (see and modify within postproc_deconvolve_main.m).
+
+% WARNING: this pproc step is not recommended, but is added as an optional
+% step just for cases in which deconvolved data is needed. It is suggested
+% to deconvolve first and save the dataset. Also, it takes a long time to
+% perform voxel-wise deconvolution (around 15 minutes per subject)
+
+% [dec_out, data] = postproc_deconvolve_main(data);
+% inputs.pproc.deconvolve = 1;
+
+
+% 2.4 Censor frames flagged with high motion (takes 0.5 seconds per subject).
+% data = postproc_censor_data(data, motion_info);
+% inputs.pproc.censor = 1;
+
+
+% Finally assure that data is in single format
+for sub = 1:Nsubs
+    data{sub} = single(data{sub});
+end
+
+disp('postprocessing done')
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% 3. Clustering of data. -> CHOOSE THE DATA OF THE CORRECT POST-PROCESSING STEP TO WORK WITH!!!
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Before running the k-means algorithm, define the parameters that will be
+% used, and also how to mask data as in Liu et al. [2]
+
+% save the amount of observations for each subject.
+for sub = 1:length(data)
+    inputs.Nobs(sub) = size(data{sub},1);
+end
+
+% concatenate subjects.
+data = cell2mat(data);
+
+% mask frames
+inputs.liu_mask.mask_high = 0.1; % High % below which to sparsefy each frame.
+inputs.liu_mask.mask_low  = 0.05; % Low % above which to sparsefy each frame.
+data_chosen = postproc_liu_mask(data, inputs.liu_mask);
+
+% parcellate data
+
+% define the seeds.
+inputs.seed_dir = 'D:\Gutierrez\mice_dFC\Templates_rois_pagani\low_res\lowres_rois_daniel';
+cd(inputs.seed_dir)
+
+seed_list = dir('*.nii.gz');
+% seed_order = [3,6,10,4,5,7,8,1,2,9];
+Nrois = length(seed_list);
+for s = 1:length(seed_list)
+    inputs.seed_names{s} = seed_list(s).name(1:end-4);
+    inputs.seed_paths{s} = [pwd '\' seed_list(s).name];
+end
+
+%turn data_chosen into cell
+tt=1;
+for sub = 1:Nsubs
+    data_chosen_tmp{sub}(1:inputs.Nobs(sub),:) = data(tt:tt+inputs.Nobs(sub)-1,:);
+    tt=tt+inputs.Nobs(sub);
+end
+
+%Extract data from seeds and the GS and normalize it. Also compute spectra
+%extract seed TS.
+inputs.TR = 1.2; % define sampling rate (s)
+flag_roisNAN = zeros(Nsubs,Nrois);
+for s = 1:length(inputs.seed_names)
+    seed_data{s} = caps_SB_extract_TS(data_chosen_tmp, inputs.seed_paths{s}, inputs.seed_names{s}, mask_info.mask);    
+    seed_data{s}.TS_norm = postproc_normalize(seed_data{s}.TS);    
+    seed_data{s}.PSD = caps_analysis_psd(seed_data{s}.TS_norm,inputs.TR);
+    tt=1;
+    for sub = 1:Nsubs
+        Nobs = inputs.Nobs(sub);
+        data_chosen_seed1(tt:tt+Nobs-1,s) = seed_data{s}.TS_norm{sub};
+        tt = tt+Nobs;
+        if sum(seed_data{s}.TS{sub})==0 || sum(isnan(seed_data{s}.TS_norm{sub}))==Nobs
+            flag_roisNAN(sub,s)=1;
+        end
+    end
+    
+end
+
+% eliminate ROIs with NaN or zeros.
+data_chosen_seed=[];
+s_on = 0;
+for s = 1:Nrois
+    if sum(flag_roisNAN(:,s))==0
+        s_on=s_on+1;
+        data_chosen_seed(:,s_on) = data_chosen_seed1(:,s);
+    end
+end
+
+clear data_chosen_tmp data_chosen
+
+% change to main directory and create a directory for your analysis, starting
+% with the name of the dataset: give the analysis an ID.
+cd(inputs.main)
+inputs.analysis_ID = 'shank3_KO_parcel_r1_k2-16_20reps';
+mkdir(inputs.analysis_ID);
+cd(inputs.analysis_ID)
+
+% Define the parameters of the k-means algorithm to use:
+inputs.kmeans.Ncaps        = 2:16;               % range of k's (amount of clusters) to do.
+inputs.kmeans.max_iter     = 500;             % maximum amount of iterations to reach convergence.
+inputs.kmeans.Nreps        = 20;               % number of initializations of the algorithm.
+inputs.kmeans.distance     = 'correlation';   % distance metric to use (see kmeans.m).
+inputs.kmeans.online_phase = 'on';            % guarantees a solutio (see kmeans.m)
+inputs.kmeans.start        = 'plus';          % The initialization condition (see kmeans.m), default use 'plus'
+inputs.kmeans.opts = statset('UseParallel',1);
+% In case you have a preliminary hypothesis of the cluster "centroids", use
+% CAPs, use start = 'seeds' and load a set of hypothesis CAPs (K x N)
+% matrix with the seed-clusters to use. The following part will
+% automatically create seeds and put them in order.
+
+if strcmp(inputs.kmeans.start, 'seeds') ==1
+    inputs.kmeans.start    = [];
+    clusters_init = 'D:\Gutierrez\mice_dFC\results_paper\cap_templates7.mat';
+    load(clusters_init)
+    inputs.kmeans.start = cap_templates;
+end
+cd(inputs.main), cd(inputs.analysis_ID)
+
+% Perform clustering. The data that enters the algorithm is a T x N matrix
+% with T being the amount of concatenated frames for all the dataset after
+% post-processing, and N is the number of voxels in the mask.
+
+
+%now for every K, create a folder with the CAP mean maps, and T-maps.
+Ncaps = inputs.kmeans.Ncaps;
+mkdir('CAP_results')
+cd('CAP_results')
+    for k = inputs.kmeans.Ncaps
+        tmp = [];
+        [tmp.frame_index, tmp.Centroids, tmp.sumd, tmp.Dist_to_centroid] = kmeans(data_chosen_seed1,k,...
+            'Distance', inputs.kmeans.distance,...
+            'MaxIter',inputs.kmeans.max_iter,...
+            'OnlinePhase',inputs.kmeans.online_phase,...
+            'Replicates', inputs.kmeans.Nreps,...
+            'Start', inputs.kmeans.start,...
+            'Options',inputs.kmeans.opts);
+
+        % compute and map CAPs using data (not masked). The reduce results to
+        % single format
+        tmp = caps_compute_map_caps(data,tmp,k);
+
+        tmp.frame_index = single(tmp.frame_index);
+        tmp.cap_p_map_fdr = single(tmp.cap_p_map_fdr);
+
+        %create directory for maps
+        tmp_dir = (['CAPS_k' num2str(k)]);
+        mkdir(tmp_dir)
+        cd(tmp_dir)
+
+        % Build maps
+        for c = 1:k
+            caps_create_nii(tmp.cap_mean_map(c,:), mask_info, ['CAP_' num2str(c) '_mean_BOLD']);
+            caps_create_nii(tmp.cap_T_map(c,:), mask_info, ['CAP_' num2str(c) '_T_map']);
+        end
+        % recompute CAPs by adding garbage cluster
+        tmp = caps_add_garbage_cluster(tmp,data);
+        
+        % re-map CAPs
+        tmp_dir2 = (['CAPS_k+1_' num2str(k)]);
+        mkdir(tmp_dir2)
+        cd(tmp_dir2)
+         for c = 1:k+1
+            caps_create_nii(tmp.addk.cap_mean_map(c,:), mask_info, ['CAP_' num2str(c) '_mean_BOLD']);
+            caps_create_nii(tmp.addk.cap_T_map(c,:), mask_info, ['CAP_' num2str(c) '_T_map']);
+        end
+        cd ..
+        cd ..
+        
+        caps_results.(['CAPS_' num2str(k)]) = tmp;
+        display(['done with k=' num2str(k)])
+        
+        
+    end
+
+cd(inputs.main), cd(inputs.analysis_ID)
+save('caps_results','caps_results')
+save('inputs','inputs')
+
+% save the results of the kmeans runs.
+
+disp('done with clustering')
+
+%Before continuing, clear all varialbles except paths and names. If you
+%censored data, it is recommended to clear data and reload the complete
+%dataset, as continuity in the dynamical analyses is key. Reload and re-do
+%postprocessing
+keep_vars = {'inputs'};
+clearvars('-except', keep_vars{:})
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% 4. Perform additional analyses on selected
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+cd(inputs.main)
+%re-load and re-preprocess data without censoring. It can take around 5
+%minutes but is worth it.
+load(inputs.dataset_name)
+%re-post-process and extract the global signal.
+for sub = 1:length(data)
+    gs{sub,1} = mean(data{sub},2);
+    Nobs(sub) = length(gs{sub});
+end
+data = postproc_normalize(data);
+gs_norm = postproc_normalize(gs);
+
+load(inputs.mask_info_name)
+load(inputs.motion_info_name)
+
+cd(inputs.analysis_ID)
+load('caps_results')
+
+% choose a k to perform further analyses. BE SURE "caps_results" has the
+% analysis for that amount of clusters!
+
+k = 7;
+Nsubs = length(data);
+% caps_analysis = [];
+caps_analysis.gs = gs;
+caps_analysis.gs_norm = gs_norm;
+
+% call upon the results of the specified k.
+results = caps_results.(['CAPS_' num2str(k)]);
+clear caps_results
+
+% since each subject may have different amounts of datapoints, take the
+% amount of observations from the gs timecourses.
+Nobs = inputs.Nobs;
+caps_analysis.Nobs = Nobs;
+
+
+% 1. Check the CAP occurrence rate subject-wise.
+[caps_analysis.cap_occ] = caps_analysis_sub_occ(results, Nsubs,Nobs);
+
+% 2. motion to CAP identification. This is done ONLY if data was not
+% censored, unless censoring is done with frame replacement. It is only to check which frames catalogued as being with high
+% motion were associated to each specific CAP.
+[caps_analysis.motion2CAP] = caps_analysis_motion2CAP(motion_info, caps_analysis.cap_occ);
+
+% 3. CAP_evolution of correlation. This can be done ONLY in the complete
+% (NO CENSORING) data, unless censoring is done with frame replacement.
+for sub = 1:Nsubs
+    data_chosen{sub,1} = postproc_liu_mask(data{sub}, inputs.liu_mask);
+end
+
+[caps_analysis.cap_CFC_analysis, caps_analysis.btw_cap_corr] = caps_analysis_CFC(data_chosen, results.cap_mean_map);
+
+% also compute the power spectra of CFC timecourses for all subjects.
+% REMEMBER to define in the inputs, the TR of data. CHOOSE BETWEEN FFT OR
+% MULTITAPER PSD.
+
+inputs.TR = 1.2;
+[caps_analysis.cap_CFC_analysis.psd] = caps_analysis_psd(caps_analysis.cap_CFC_analysis.CFC_norm, inputs.TR);
+
+inputs.NW = 4;
+inputs.NFFT = Nobs(1);
+[caps_analysis.cap_CFC_analysis.psdMT] = caps_analysis_psdMT(caps_analysis.cap_CFC_analysis.CFC_norm, inputs.TR, inputs.NW, inputs.NFFT);
+
+% based on the CFC-PSD frequency peaks, decide on a range to conpumte
+% cross-correlation functions.
+inputs.ccorr_T = 100;
+[caps_analysis.cap_CFC_analysis.ccorr] = caps_analysis_CFC_ccorr(caps_analysis.cap_CFC_analysis.CFC_norm,inputs.ccorr_T);
+[caps_analysis.cap_CFC_analysis.GSccorr] = caps_analysis_CFC_GS_ccorr(caps_analysis.cap_CFC_analysis.CFC_norm, caps_analysis.gs_norm, inputs.ccorr_T);
+
+% 4. Choosing a percentage of highest CFC frames (best clustered frames),
+% build an average evolution trace with the previous and subsequent frames
+% time-locked to these occurrences.
+% first find the peaks of each subject's CFCs.
+inputs.CFC_thr = 1;
+caps_analysis.gs_phase_analysis.CFC_thr = inputs.CFC_thr;
+
+[caps_analysis.cap_CFC_analysis.CFC_peak_ind, caps_analysis.cap_CFC_analysis.CFC_peak_amp] = caps_analysis_CFC_peaks(caps_analysis.cap_CFC_analysis.CFC_norm,caps_analysis.cap_CFC_analysis.CFC, motion_info, inputs.CFC_thr);
+
+% now use the selected peaks from the CFC data to compute CAP evolution
+% "modes" and capture the frames before and after the peaks. The amount of
+% frames should be consistent with the frequency peaks of the of the
+% observed CFC spectra. So if the peak spectra is around 0.02 Hz, then if
+% TR = 1.2s, an oscillation would take about 41 frames (time-points), 20
+% before, 20 after.
+
+inputs.cap_evo_group_percent = 0.02;
+inputs.cap_evo_group_range = 30;
+[caps_analysis.evo_group] = caps_analysis_cap_evo_group(data_chosen, caps_analysis.cap_CFC_analysis.CFC_peak_ind, caps_analysis.cap_CFC_analysis.CFC_peak_amp, caps_analysis.cap_occ.occ_prob_mean,inputs.cap_evo_group_range, caps_analysis.cap_CFC_analysis.CFC, inputs.cap_evo_group_percent);
+
+%create and save the CAP evolution maps.
+cd('CAP_results')
+cd(['CAPS_k' num2str(k)])
+mkdir('CAP_evolution_maps')
+cd('CAP_evolution_maps')
+caps_analysis_evo_images(caps_analysis.evo_group, mask_info);
+cd ..
+
+% 5. Compute CAP intervals and durations.
+
+[caps_analysis.cap_intervals, caps_analysis.cap_durations] = caps_analysis_interv_latency(caps_analysis.cap_occ.frame_ind_sub);
+
+
+% 6. CAP transition probability matrices.
+[caps_analysis.trans_prob] = caps_analysis_trans_prob(caps_analysis.cap_occ.frame_ind_sub);
+
+% 7. Compute the psd of the global signal, filter it and compute its phase.
+caps_analysis.gs_phase_analysis.gs= gs; caps_analysis.gs_phase_analysis.gs_norm= gs_norm;
+
+%now compute its spectra for every subject. matlab way or Multitaper way
+caps_analysis.gs_phase_analysis.gs_psd = caps_analysis_psd(caps_analysis.gs_phase_analysis.gs_norm, inputs.TR);
+inputs.NW = 4;
+inputs.NFFT = Nobs(1);
+caps_analysis.gs_phase_analysis.gs_psdMT = caps_analysis_psdMT(caps_analysis.gs_phase_analysis.gs_norm, inputs.TR,inputs.NW,inputs.NFFT);
+
+% now filter the GS to a narrow-band where CFC and GS PSD peaks are found
+% (in our case [0.01, 0.03 Hz]).
+inputs.filter.f_low = 0.01;
+inputs.filter.f_up = 0.03;
+inputs.filter.FS = 1/inputs.TR;
+[caps_analysis.gs_phase_analysis.gs_filt] = caps_analysis_NBfilter(caps_analysis.gs_phase_analysis.gs_norm,inputs.filter.f_low,inputs.filter.f_up,inputs.filter.FS);
+
+% save a filtered version of CFC timecourses
+[caps_analysis.cap_CFC_analysis.CFC_filt] = caps_analysis_NBfilter(caps_analysis.cap_CFC_analysis.CFC_norm,inputs.filter.f_low,inputs.filter.f_up,inputs.filter.FS);
+
+% Now compute the instantaneous phase of the GS.
+[caps_analysis.gs_phase_analysis.gs_phase] = caps_analysis_comp_phase(caps_analysis.gs_phase_analysis.gs_filt);
+
+% save also the instantaneous phases of CFCs.
+[caps_analysis.cap_CFC_analysis.CFC_phase] = caps_analysis_comp_phase(caps_analysis.cap_CFC_analysis.CFC_filt);
+
+%% 5. Spectral and phase analyses.
+% 1. Compute the PSD frequencies at peaks and the confidence interval for
+% both the CFC's and GS' PSD.If there are subject with different amount of
+% timepoints, then the analysis is done with the downsampled PSD (see caps_analysis_psd.m).
+[caps_analysis.cap_CFC_analysis.psd.peaks, caps_analysis.cap_CFC_analysis.psd.freq_at_peaks, caps_analysis.cap_CFC_analysis.psd.freqs_at_peak_stats] = caps_analysis_freq_at_peak(caps_analysis.cap_CFC_analysis.psd.psd_ds,caps_analysis.cap_CFC_analysis.psd.min_freq_vec);
+[caps_analysis.cap_CFC_analysis.psd_filt] = caps_analysis_psd(caps_analysis.cap_CFC_analysis.CFC_filt, inputs.TR);
+[caps_analysis.cap_CFC_analysis.psd_filt.peaks, caps_analysis.cap_CFC_analysis.psd_filt.freq_at_peaks, caps_analysis.cap_CFC_analysis.psd_filt.freqs_at_peak_filt_stats] = caps_analysis_freq_at_peak(caps_analysis.cap_CFC_analysis.psd_filt.psd_ds,caps_analysis.cap_CFC_analysis.psd_filt.min_freq_vec);
+
+[caps_analysis.gs_phase_analysis.gs_psd.peaks, caps_analysis.gs_phase_analysis.gs_psd.freq_at_peaks, caps_analysis.gs_phase_analysis.gs_psd.freqs_at_peak_stats] = caps_analysis_freq_at_peak(caps_analysis.gs_phase_analysis.gs_psd.psd_ds,caps_analysis.gs_phase_analysis.gs_psd.min_freq_vec);
+caps_analysis.gs_phase_analysis.gs_psd_filt = caps_analysis_psd(caps_analysis.gs_phase_analysis.gs_filt, inputs.TR);
+[caps_analysis.gs_phase_analysis.gs_psd_filt.peaks, caps_analysis.gs_phase_analysis.gs_psd_filt.freq_at_peaks, caps_analysis.gs_phase_analysis.gs_psd_filt.freqs_at_peak_stats] = caps_analysis_freq_at_peak(caps_analysis.gs_phase_analysis.gs_psd_filt.psd_ds,caps_analysis.gs_phase_analysis.gs_psd_filt.min_freq_vec);
+
+% 2. Find the distribution of the GS phase at each CAP's occurrence.
+[caps_analysis.gs_phase_analysis.gs_phase_at_cap] = caps_analysis_gs_phase_at_cap(caps_analysis.gs_phase_analysis.gs_phase.phase, caps_analysis.cap_CFC_analysis.CFC_norm, caps_analysis.cap_occ.frame_ind_sub, inputs.CFC_thr);
+% also find the distribution of CFC phase at each CAP's occurrence.
+[caps_analysis.cap_CFC_analysis.CFC_phase_at_cap] = caps_analysis_CFC_phase_at_cap(caps_analysis.cap_CFC_analysis.CFC_phase.phase, caps_analysis.cap_CFC_analysis.CFC_norm, caps_analysis.cap_occ.frame_ind_sub, inputs.CFC_thr);
+
+% Now find the distribution within GS cycles.
+[caps_analysis.gs_phase_analysis.gs_phase_at_cap_wtn_cycles] = caps_analysis_gs_phase_at_cap_in_cycle(caps_analysis.gs_phase_analysis.gs_phase.phase, caps_analysis.cap_CFC_analysis.CFC_norm, caps_analysis.cap_occ.frame_ind_sub, inputs.CFC_thr);
+% also fin the distribution within CFC cycles.
+[caps_analysis.cap_CFC_analysis.CFC_phase_at_cap_wtn_cycles] = caps_analysis_CFC_phase_at_cap_in_cycle(caps_analysis.cap_CFC_analysis.CFC_phase.phase, caps_analysis.cap_CFC_analysis.CFC_norm, caps_analysis.cap_occ.frame_ind_sub, inputs.CFC_thr);
+
+% 3. compute the GS phase differences between at each CAP-pair's occurrence.
+[caps_analysis.gs_phase_analysis.gs_phase_diff_btw_cap] = caps_analysis_gs_phase_diff_btw_caps(caps_analysis.gs_phase_analysis.gs_phase.phase, caps_analysis.cap_CFC_analysis.CFC_norm, caps_analysis.cap_occ.frame_ind_sub, inputs.CFC_thr);
+% now also compute the CFC phase differences between the occurrences of 2
+% CAPs. (should be near zero)
+[caps_analysis.cap_CFC_analysis.CFC_phase_diff_btw_caps] = caps_analysis_CFC_phase_diff_btw_caps(caps_analysis.cap_CFC_analysis.CFC_phase.phase, caps_analysis.cap_CFC_analysis.CFC_norm, caps_analysis.cap_occ.frame_ind_sub, inputs.CFC_thr);
+% Now for each CAP(i) compute the difference between the CFC_phase of
+% CAP(i) and CAP(j) at occurrences of CAP(j)
+[caps_analysis.cap_CFC_analysis.CFC_phase_diff_btw_occ_of_CAP] = caps_analysis_CFC_phase_diff_btw_a_cap_occ(caps_analysis.cap_CFC_analysis.CFC_phase.phase, caps_analysis.cap_CFC_analysis.CFC_norm, caps_analysis.cap_occ.frame_ind_sub, inputs.CFC_thr);
+%Now  for each CAP(i) compute the difference between the CFC_phase of
+% CAP(i) at its occurrence, and its phase at the occurrence of CAP(j).
+[caps_analysis.cap_CFC_analysis.CFC_phase_diff_of_cap_bwt_caps_occs] = caps_analysis_CFC_phase_diff_of_cap_bwt_caps_occs(caps_analysis.cap_CFC_analysis.CFC_phase.phase, caps_analysis.cap_CFC_analysis.CFC_norm, caps_analysis.cap_occ.frame_ind_sub, inputs.CFC_thr);
+
+
+% now compute the same
+
+% Now find the distribution within GS cycles.
+[caps_analysis.gs_phase_analysis.gs_phase_diff_btw_cap_in_cycle] = caps_analysis_gs_phase_diff_btw_caps_in_cycle(caps_analysis.gs_phase_analysis.gs_phase.phase, caps_analysis.cap_CFC_analysis.CFC_norm, caps_analysis.cap_occ.frame_ind_sub, inputs.CFC_thr);
+
+
+clear  data_chosen
+cd(['CAPS_k' num2str(k)])
+save('caps_analysis', 'caps_analysis','-v7.3')
+cd(inputs.main)
+cd(inputs.analysis_ID)
+save('inputs', 'inputs')
+
+
+clear data data_chosen caps_analysis results
+
+
+
+% end main function.
+end
+
+
+
